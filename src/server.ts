@@ -9,19 +9,13 @@ const DEDUP_WINDOW_MS = 10 * 60 * 1000;
 
 interface ClickBody {
   url: string;
-  title?: string;
-  date: string;
-  time: string;
 }
 
 const clickSchema = {
   type: 'object',
-  required: ['url', 'date', 'time'],
+  required: ['url'],
   properties: {
     url: { type: 'string', maxLength: 500 },
-    title: { type: 'string', maxLength: 200 },
-    date: { type: 'string', minLength: 1, maxLength: 50 },
-    time: { type: 'string', minLength: 1, maxLength: 20 },
   },
 } as const;
 
@@ -51,17 +45,24 @@ export async function createServer(config: Config, db: Db, onClick: (click: Clic
     return false;
   }
 
-  function isAllowedUrl(raw: string) {
+  // Ссылка на страницу события, если её можно принять: /ru/phuket/events/ddt-phuket/ → ddt-phuket
+  function parseClick(raw: string): Click | null {
     let url: URL;
     try {
       url = new URL(raw);
     } catch {
-      return false;
+      return null;
     }
-    if (url.protocol !== 'https:' && url.protocol !== 'http:') return false;
-    if (config.allowedUrlHosts.length === 0) return true;
+    if (url.protocol !== 'https:' && url.protocol !== 'http:') return null;
+
     const host = url.hostname.toLowerCase();
-    return config.allowedUrlHosts.some((h) => host === h || host.endsWith(`.${h}`));
+    const allowed =
+      config.allowedUrlHosts.length === 0 ||
+      config.allowedUrlHosts.some((h) => host === h || host.endsWith(`.${h}`));
+    const eventId = url.pathname.split('/').filter(Boolean).pop();
+    if (!allowed || !eventId) return null;
+
+    return { eventId, url: url.origin + url.pathname };
   }
 
   server.get('/health', async () => ({ ok: true }));
@@ -74,16 +75,10 @@ export async function createServer(config: Config, db: Db, onClick: (click: Clic
       config: { rateLimit: { max: 30, timeWindow: '1 minute' } },
     },
     async (req, reply) => {
-      const url = req.body.url.trim();
-      if (!isAllowedUrl(url)) return reply.code(400).send({ error: 'Недопустимый url' });
+      const click = parseClick(req.body.url.trim());
+      if (!click) return reply.code(400).send({ error: 'Недопустимый url' });
 
-      const click: Click = {
-        url,
-        title: req.body.title?.trim() || null,
-        date: req.body.date.trim(),
-        time: req.body.time.trim(),
-      };
-      if (!isDuplicate(`${req.ip}|${click.url}|${click.date}|${click.time}`)) {
+      if (!isDuplicate(`${req.ip}|${click.eventId}`)) {
         db.addClick(click);
         onClick(click);
       }

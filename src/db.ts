@@ -3,10 +3,9 @@ import { dirname } from 'node:path';
 import Database from 'better-sqlite3';
 
 export interface Click {
+  // Slug события из адреса страницы, одинаковый для всех языковых версий
+  eventId: string;
   url: string;
-  title: string | null;
-  date: string;
-  time: string;
 }
 
 export interface EventStat extends Click {
@@ -21,34 +20,31 @@ export function openDb(path: string) {
   db.exec(`
     CREATE TABLE IF NOT EXISTS clicks (
       id         INTEGER PRIMARY KEY,
+      event_id   TEXT    NOT NULL,
       url        TEXT    NOT NULL,
-      title      TEXT,
-      date       TEXT    NOT NULL,
-      time       TEXT    NOT NULL,
       created_at INTEGER NOT NULL -- unix ms, UTC
     );
     CREATE INDEX IF NOT EXISTS clicks_created_at ON clicks (created_at);
   `);
 
-  const insert = db.prepare<[string, string | null, string, string, number]>(
-    'INSERT INTO clicks (url, title, date, time, created_at) VALUES (?, ?, ?, ?, ?)',
+  const insert = db.prepare<[string, string, number]>(
+    'INSERT INTO clicks (event_id, url, created_at) VALUES (?, ?, ?)',
   );
   const total = db.prepare<[number], { total: number }>(
     'SELECT COUNT(*) AS total FROM clicks WHERE created_at >= ?',
   );
-  // Одно и то же событие в разные даты — разные строки статистики
   const top = db.prepare<[number, number], EventStat>(`
-    SELECT url, MAX(title) AS title, date, time, COUNT(*) AS clicks
+    SELECT event_id AS eventId, MAX(url) AS url, COUNT(*) AS clicks
     FROM clicks
     WHERE created_at >= ?
-    GROUP BY url, date, time
+    GROUP BY event_id
     ORDER BY clicks DESC
     LIMIT ?
   `);
 
   return {
     addClick(click: Click) {
-      insert.run(click.url, click.title, click.date, click.time, Date.now());
+      insert.run(click.eventId, click.url, Date.now());
     },
     stats(since: number, limit = 10) {
       return {

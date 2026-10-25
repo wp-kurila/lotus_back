@@ -1,6 +1,6 @@
 # lotus_back
 
-Сбор кликов на «Билеты» с сайта-афиши и Telegram-бот со статистикой. Один процесс: HTTP API (Fastify) и бот (grammY, long polling), данные в SQLite.
+Сбор кликов на «Купить билет» с [lotusarena.life](https://lotusarena.life) и Telegram-бот со статистикой. Один процесс: HTTP API (Fastify) и бот (grammY, long polling), данные в SQLite.
 
 ## Запуск
 
@@ -27,78 +27,90 @@
 `POST /api/clicks`. Тело — JSON (`application/json` или `text/plain`, второй вариант нужен для `sendBeacon`):
 
 ```json
-{ "url": "https://example.com/events/42", "title": "Джаз-вечер", "date": "15 ноября", "time": "19:00" }
+{ "url": "https://lotusarena.life/ru/phuket/events/ddt-phuket/" }
 ```
 
-`url`, `date`, `time` обязательны, `title` — нет. `date` и `time` хранятся и показываются как есть. Ответ: `204`. Повторный клик того же посетителя (IP) на то же событие в течение 10 минут не считается. Лимит — 30 запросов в минуту с одного IP.
+Сервер берёт из ссылки slug события (последний сегмент пути, `ddt-phuket`), поэтому клики с `/ru/`, `/en/` и `/th/` версий одной страницы считаются вместе. Время клика сервер ставит сам. Query и hash из ссылки отбрасываются.
 
-Хост в `url` должен быть в `ALLOWED_URL_HOSTS` (поддомены тоже подходят). Иначе любой желающий сможет присылать тебе в личку произвольные ссылки. Если «Билеты» ведут на внешнюю кассу, добавь и её домен.
+Ответ: `204`. Повторный клик того же посетителя (IP) на то же событие в течение 10 минут не считается. Лимит — 30 запросов в минуту с одного IP.
+
+Хост в `url` должен быть в `ALLOWED_URL_HOSTS` (поддомены тоже подходят). Иначе любой желающий сможет присылать тебе в личку произвольные ссылки.
 
 `GET /health` → `{ "ok": true }`.
 
 ## Фронт
 
-```ts
-const API_URL = '/api/clicks'; // или https://api.example.com/api/clicks
+Сайт — репозиторий `lotus_next` (Next.js, статический экспорт). Запросы к бэку лежат в `src/api/`, кнопка — `src/components/events/ticket-button.tsx`. Данные уходят через `sendBeacon` как `text/plain`, поэтому CORS-preflight не нужен.
 
-export function trackTicketClick(event: { url: string; title?: string; date: string; time: string }) {
-  const body = JSON.stringify(event);
-  // sendBeacon не обрывается при уходе со страницы и не требует CORS-preflight
-  if (!navigator.sendBeacon?.(API_URL, body)) {
-    fetch(API_URL, { method: 'POST', body, keepalive: true }).catch(() => {});
-  }
-}
+Для локальной проверки в `.env.local` фронта:
+
+```
+NEXT_PUBLIC_API_URL=http://localhost:4000
 ```
 
-```tsx
-<a href={event.ticketsUrl} onClick={() => trackTicketClick({ url: event.pageUrl, title: event.title, date: event.date, time: event.time })}>
-  Билеты
-</a>
-```
+В `.env` бэка тогда нужен `ALLOWED_URL_HOSTS=lotusarena.life,localhost`, потому что `url` будет вида `http://localhost:3000/...`.
 
-Если фронт шлёт `Content-Type: application/json` с другого домена, укажи его домен в `CORS_ORIGINS`.
+## Деплой
 
-## Деплой на VPS
+Пуш в `master` запускает GitHub Actions ([.github/workflows/deploy.yml](.github/workflows/deploy.yml)):
 
-Нужен Node.js 22+.
+1. Проект собирается на раннере.
+2. `dist/`, `package*.json`, `ecosystem.config.cjs` и `.env` уходят по SSH в `/var/www/lotus_back`.
+3. На сервере выполняется `npm ci --omit=dev`, и процесс перезапускается через pm2 ([ecosystem.config.cjs](ecosystem.config.cjs)).
+4. Если сервис не ответил на `/health` за 15 секунд, деплой считается упавшим, а в логе Actions появляются последние строки `pm2 logs`.
+
+Вручную: Actions → Build and deploy → Run workflow.
+
+`.env` собирается из секретов при каждом деплое. База `data/stats.db` на сервере при этом не трогается.
+
+Секреты репозитория (Settings → Secrets and variables → Actions):
+
+| Секрет            | Что это                                                                 |
+| ----------------- | ----------------------------------------------------------------------- |
+| `SSH_HOST`        | IP или домен сервера                                                    |
+| `SSH_USER`        | пользователь на сервере, `ubuntu`                                       |
+| `SSH_PRIVATE_KEY` | приватный ключ; публичный должен лежать в `~/.ssh/authorized_keys` на сервере |
+| `BOT_TOKEN`       | токен бота                                                              |
+| `ADMIN_IDS`       | Telegram ID через запятую                                               |
+
+Логи на сервере: `pm2 logs lotus-back`.
+
+### Один раз на сервере
+
+Нужны Node.js 22+ и pm2. Папка под проект:
 
 ```bash
-git clone … /opt/lotus_back && cd /opt/lotus_back
-npm ci && npm run build
-cp .env.example .env   # заполнить
+sudo mkdir -p /var/www/lotus_back && sudo chown ubuntu:ubuntu /var/www/lotus_back
 ```
 
-`/etc/systemd/system/lotus-back.service`:
+Чтобы pm2 поднимал процессы после перезагрузки, нужен `pm2 startup`. Если на сервере pm2 уже так настроен для других проектов, ничего делать не нужно: деплой сам вызывает `pm2 save`.
 
-```ini
-[Unit]
-Description=lotus-back
-After=network-online.target
-Wants=network-online.target
+Сервер слушает `127.0.0.1:4000`, наружу его отдаёт nginx на поддомене `api.shamanphuket.com`. Это временно, пока нет доступа к DNS `lotusarena.life`. DNS: A-запись `api` → IP сервера.
 
-[Service]
-WorkingDirectory=/opt/lotus_back
-ExecStart=/usr/bin/node dist/main.js
-Restart=always
-User=www-data
-
-[Install]
-WantedBy=multi-user.target
-```
-
-```bash
-sudo systemctl enable --now lotus-back
-journalctl -u lotus-back -f   # логи
-```
-
-Пользователю из `User=` нужны права на запись в `data/`. Сервер слушает `127.0.0.1`, наружу его отдаёт nginx. Проще всего на том же домене, что и сайт: тогда CORS не нужен.
+`/etc/nginx/sites-available/lotus_api`:
 
 ```nginx
-location /api/ {
-    proxy_pass http://127.0.0.1:3000;
-    proxy_set_header Host $host;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+server {
+    listen 80;
+    listen [::]:80;
+    server_name api.shamanphuket.com;
+
+    location /api/ {
+        proxy_pass http://127.0.0.1:4000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+
+    location = /health {
+        proxy_pass http://127.0.0.1:4000;
+    }
 }
+```
+
+```bash
+sudo ln -s /etc/nginx/sites-available/lotus_api /etc/nginx/sites-enabled/
+sudo nginx -t && sudo systemctl reload nginx
+sudo certbot --nginx -d api.shamanphuket.com   # когда DNS-запись уже работает
 ```
 
 `X-Forwarded-For` принимается только от локального прокси, поэтому подделать IP снаружи нельзя.

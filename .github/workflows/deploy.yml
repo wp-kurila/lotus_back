@@ -1,0 +1,91 @@
+name: Build and deploy
+
+on:
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+
+# Второй пуш ждёт окончания текущего деплоя, а не мешает ему
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+env:
+  APP_DIR: /var/www/lotus_back
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Та же версия, что на сервере
+      - name: Use Node.js 24.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24.x"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Write .env
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          ADMIN_IDS: ${{ secrets.ADMIN_IDS }}
+        run: |
+          for name in BOT_TOKEN ADMIN_IDS; do
+            if [ -z "${!name}" ]; then echo "::error::Не задан секрет $name"; exit 1; fi
+          done
+          umask 077
+          cat > .env <<EOF
+          BOT_TOKEN=${BOT_TOKEN}
+          ADMIN_IDS=${ADMIN_IDS}
+          CORS_ORIGINS=https://lotusarena.life,https://www.lotusarena.life
+          ALLOWED_URL_HOSTS=lotusarena.life
+          EOF
+
+      - name: Add host to known_hosts
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H ${{ secrets.SSH_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Set up SSH
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Deploy
+        env:
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+        run: |
+          # Заменяется только сборка; база в data/ остаётся на сервере
+          ssh ${SSH_USER}@${SSH_HOST} "mkdir -p ${APP_DIR} && rm -rf ${APP_DIR}/dist"
+          tar czf - dist package.json package-lock.json ecosystem.config.cjs .env \
+            | ssh ${SSH_USER}@${SSH_HOST} "tar xzf - -C ${APP_DIR}"
+
+          # node_modules ставим на сервере: better-sqlite3 собирается под его Node
+          ssh ${SSH_USER}@${SSH_HOST} "APP_DIR=${APP_DIR} bash -s" <<'EOF'
+          set -e
+          export NVM_DIR="$HOME/.nvm"
+          if [ -s "$NVM_DIR/nvm.sh" ]; then . "$NVM_DIR/nvm.sh"; fi
+
+          cd "$APP_DIR"
+          npm ci --omit=dev
+          pm2 startOrRestart ecosystem.config.cjs
+          pm2 save
+
+          for i in $(seq 1 15); do
+            if curl -sf http://127.0.0.1:4000/health > /dev/null; then echo "Сервис отвечает"; exit 0; fi
+            sleep 1
+          done
+          echo "Сервис не ответил за 15 секунд"
+          pm2 logs lotus-back --lines 30 --nostream
+          exit 1
+          EOF

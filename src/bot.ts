@@ -32,14 +32,7 @@ function plural(n: number, one: string, few: string, many: string) {
 }
 
 function formatClick(click: Click) {
-  return [
-    '🎟 Клик на «Билеты»',
-    click.title && `<b>${esc(click.title)}</b>`,
-    `📅 ${esc(click.date)}, ${esc(click.time)}`,
-    `🔗 ${esc(click.url)}`,
-  ]
-    .filter(Boolean)
-    .join('\n');
+  return ['🎟 Клик на «Купить билет»', `<b>${esc(click.eventId)}</b>`, `🔗 ${esc(click.url)}`].join('\n');
 }
 
 function formatStats(db: Db, period: { label: string; ms: number }) {
@@ -47,10 +40,7 @@ function formatStats(db: Db, period: { label: string; ms: number }) {
   const { total, top } = db.stats(since);
   if (total === 0) return `📊 ${period.label}: кликов нет`;
 
-  const lines = top.map(
-    (e, i) =>
-      `${i + 1}. <a href="${esc(e.url)}">${esc(e.title ?? e.url)}</a>, ${esc(e.date)} ${esc(e.time)} — <b>${e.clicks}</b>`,
-  );
+  const lines = top.map((e, i) => `${i + 1}. <a href="${esc(e.url)}">${esc(e.eventId)}</a> — <b>${e.clicks}</b>`);
   return [
     `📊 ${period.label}: <b>${total}</b> ${plural(total, 'клик', 'клика', 'кликов')}`,
     '',
@@ -66,7 +56,7 @@ export function createBot(token: string, adminIds: number[], db: Db) {
     const id = ctx.from?.id;
     if (id !== undefined && adminIds.includes(id)) {
       const help = COMMANDS.map((c) => `/${c.command} — ${c.description.toLowerCase()}`).join('\n');
-      return ctx.reply(`Сюда будут приходить клики на «Билеты».\n\n${help}`);
+      return ctx.reply(`Сюда будут приходить клики на «Купить билет».\n\n${help}`);
     }
     return ctx.reply(`Твой Telegram ID: <code>${id}</code>\nДобавь его в ADMIN_IDS, чтобы получать уведомления.`, HTML);
   });
