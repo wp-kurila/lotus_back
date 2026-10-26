@@ -1,4 +1,4 @@
-import { Bot } from 'grammy';
+import { Bot, GrammyError } from 'grammy';
 import { autoRetry } from '@grammyjs/auto-retry';
 import type { Click, Db } from './db.js';
 
@@ -50,7 +50,15 @@ function formatStats(db: Db, period: { label: string; ms: number }) {
 
 export function createBot(token: string, adminIds: number[], db: Db) {
   const bot = new Bot(token);
-  bot.api.config.use(autoRetry());
+  // Повторяем только то, что Telegram точно не выполнил (429, 5xx). При сетевой ошибке
+  // сообщение могло уже уйти, и повтор дал бы дубль; опрос обновлений grammY повторяет сам
+  bot.api.config.use(autoRetry({ rethrowHttpErrors: true }));
+
+  // Каждое входящее обновление в лог: если ответ задвоится, будет видно, пришло ли оно дважды
+  bot.use((ctx, next) => {
+    console.log(`update ${ctx.update.update_id} from ${ctx.from?.id}: ${ctx.message?.text ?? '-'}`);
+    return next();
+  });
 
   bot.command('start', (ctx) => {
     const id = ctx.from?.id;
@@ -83,7 +91,23 @@ export function createBot(token: string, adminIds: number[], db: Db) {
       await Promise.allSettled(
         adminIds.map((id) => bot.api.setMyCommands(COMMANDS, { scope: { type: 'chat', chat_id: id } })),
       );
-      await bot.start({ onStart: (me) => console.log(`Бот @${me.username} запущен`) });
+      try {
+        await bot.start({
+          // Если процесс упал, не успев подтвердить обновление, после перезапуска Telegram
+          // пришлёт его снова и команда получит второй ответ. Ценой потери команд,
+          // отправленных за секунды перезапуска, начинаем с чистой очереди.
+          drop_pending_updates: true,
+          onStart: (me) => console.log(`Бот @${me.username} запущен`),
+        });
+      } catch (err) {
+        if (err instanceof GrammyError && err.error_code === 409) {
+          throw new Error(
+            'Бот с этим токеном уже запущен в другом месте (409 Conflict). Должна работать ровно одна копия: проверь pm2 ls, systemd и локальный npm run dev',
+            { cause: err },
+          );
+        }
+        throw err;
+      }
     },
 
     stop() {
