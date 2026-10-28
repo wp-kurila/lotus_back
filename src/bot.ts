@@ -35,12 +35,23 @@ function formatClick(click: Click) {
   return ['🎟 Клик на «Купить билет»', `<b>${esc(click.eventId)}</b>`, `🔗 ${esc(click.url)}`].join('\n');
 }
 
+// Строка списка ~35 видимых символов, лимит Telegram — 4096: 50 строк влезают с большим запасом
+const STATS_LIMIT = 50;
+
 function formatStats(db: Db, period: { label: string; ms: number }) {
   const since = Number.isFinite(period.ms) ? Date.now() - period.ms : 0;
-  const { total, top } = db.stats(since);
+  const { total, events, top } = db.stats(since, STATS_LIMIT);
   if (total === 0) return `📊 ${period.label}: кликов нет`;
 
   const lines = top.map((e, i) => `${i + 1}. <a href="${esc(e.url)}">${esc(e.eventId)}</a> — <b>${e.clicks}</b>`);
+  const restEvents = events - top.length;
+  if (restEvents > 0) {
+    const restClicks = total - top.reduce((sum, e) => sum + e.clicks, 0);
+    lines.push(
+      `…и ещё ${restEvents} ${plural(restEvents, 'событие', 'события', 'событий')}, ` +
+        `${restClicks} ${plural(restClicks, 'клик', 'клика', 'кликов')}`,
+    );
+  }
   return [
     `📊 ${period.label}: <b>${total}</b> ${plural(total, 'клик', 'клика', 'кликов')}`,
     '',

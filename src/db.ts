@@ -30,8 +30,8 @@ export function openDb(path: string) {
   const insert = db.prepare<[string, string, number]>(
     'INSERT INTO clicks (event_id, url, created_at) VALUES (?, ?, ?)',
   );
-  const total = db.prepare<[number], { total: number }>(
-    'SELECT COUNT(*) AS total FROM clicks WHERE created_at >= ?',
+  const total = db.prepare<[number], { total: number; events: number }>(
+    'SELECT COUNT(*) AS total, COUNT(DISTINCT event_id) AS events FROM clicks WHERE created_at >= ?',
   );
   const top = db.prepare<[number, number], EventStat>(`
     SELECT event_id AS eventId, MAX(url) AS url, COUNT(*) AS clicks
@@ -46,9 +46,11 @@ export function openDb(path: string) {
     addClick(click: Click) {
       insert.run(click.eventId, click.url, Date.now());
     },
-    stats(since: number, limit = 10) {
+    stats(since: number, limit: number) {
+      const sums = total.get(since);
       return {
-        total: total.get(since)?.total ?? 0,
+        total: sums?.total ?? 0,
+        events: sums?.events ?? 0,
         top: top.all(since, limit),
       };
     },
